@@ -136,18 +136,12 @@ public class BackdropLayerView: NSVisualEffectView {
         self.wallpaper = CALayer()
         self.wallpaper!.name = "wallpaper"
         
-        if appState.allowReduceTransparencyToBeDisabled,
-           let wallpaperPath = appState.currentWallpaperPath {
+        if let wallpaperPath = staticWallpaperWorkaroundPath {
             self.wallpaper?.contents = cropWallpaperBelowMenuBarArea(imagePath: wallpaperPath)
-        } else {
-            if appState.allowReduceTransparencyToBeDisabled {
-                // The experimental mode requires a real image path. Dynamic wallpapers
-                // may not provide one, so fall back to the window-screenshot mode.
-                appState.allowReduceTransparencyToBeDisabled = false
-            }
-            if let windowID = getCurrentWallpaperWindowID() {
-                self.wallpaper?.contents = getWallpaperScreenshot(cgWindowID: windowID)
-            }
+        } else if let windowID = getCurrentWallpaperWindowID() {
+            // Dynamic wallpapers don't expose a usable image path. Keep the user's
+            // experimental preference intact and fall back to the live Dock wallpaper.
+            self.wallpaper?.contents = getWallpaperScreenshot(cgWindowID: windowID)
         }
         
         if let vibranceFilter = CIFilter(name: "CIVibrance") {
@@ -225,22 +219,19 @@ public class BackdropLayerView: NSVisualEffectView {
             forName: NSWorkspace.screensDidWakeNotification,
             object: nil,
             queue: OperationQueue.main) { _ in
-                if (!self.appState.allowReduceTransparencyToBeDisabled) {
-                    if let windowID = self.getCurrentWallpaperWindowID() {
-                        self.wallpaper?.contents = self.getWallpaperScreenshot(cgWindowID: windowID)
-                    }
+                if self.staticWallpaperWorkaroundPath == nil,
+                   let windowID = self.getCurrentWallpaperWindowID() {
+                    self.wallpaper?.contents = self.getWallpaperScreenshot(cgWindowID: windowID)
                 }
             }
         
         screenUnlockedObserver = DistributedNotificationCenter.default.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { _ in
-            if (!self.appState.allowReduceTransparencyToBeDisabled) {
-                if let path = self.getLastWallpaperImagePath() {
-                    if self.currentWallpaperPath != path {
-                        self.currentWallpaperPath = path
-                        if let windowID = self.getCurrentWallpaperWindowID() {
-                            self.wallpaper?.contents = self.getWallpaperScreenshot(cgWindowID: windowID)
-                        }
-                    }
+            if self.staticWallpaperWorkaroundPath == nil,
+               let path = self.getLastWallpaperImagePath(),
+               self.currentWallpaperPath != path {
+                self.currentWallpaperPath = path
+                if let windowID = self.getCurrentWallpaperWindowID() {
+                    self.wallpaper?.contents = self.getWallpaperScreenshot(cgWindowID: windowID)
                 }
             }
         }
@@ -254,15 +245,12 @@ public class BackdropLayerView: NSVisualEffectView {
             forName: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil,
             queue: OperationQueue.main) { _ in
-                if (!self.appState.allowReduceTransparencyToBeDisabled) {
-                    if let windowID = self.getCurrentWallpaperWindowID() {
-                        CATransaction.begin()
-                        CATransaction.setAnimationDuration(0.0)
-                        
-                        self.wallpaper?.contents = self.getWallpaperScreenshot(cgWindowID: windowID)
-                        
-                        CATransaction.commit()
-                    }
+                if self.staticWallpaperWorkaroundPath == nil,
+                   let windowID = self.getCurrentWallpaperWindowID() {
+                    CATransaction.begin()
+                    CATransaction.setAnimationDuration(0.0)
+                    self.wallpaper?.contents = self.getWallpaperScreenshot(cgWindowID: windowID)
+                    CATransaction.commit()
                 }
             }
         
@@ -282,7 +270,7 @@ public class BackdropLayerView: NSVisualEffectView {
             self.effect = .lightShadow
         }
         
-        if (appState.allowReduceTransparencyToBeDisabled) {
+        if staticWallpaperWorkaroundPath != nil {
             self.backdrop!.setValue(0.0, forKeyPath: "filters.brightness.inputAmount")
             self.backdrop!.setValue(1.0, forKeyPath: "filters.contrast.inputAmount")
             if (systemAppearance.name != NSAppearance.Name.darkAqua) {
@@ -516,6 +504,17 @@ public class BackdropLayerView: NSVisualEffectView {
         return NSImage(cgImage: newCGImage, size: NSSize(width: screenWidth, height: screenHeight))
     }
     
+    private var staticWallpaperWorkaroundPath: URL? {
+        guard appState.allowReduceTransparencyToBeDisabled,
+              let path = appState.currentWallpaperPath,
+              path.isFileURL,
+              FileManager.default.fileExists(atPath: path.path),
+              NSImage(contentsOf: path) != nil else {
+            return nil
+        }
+        return path
+    }
+
     private func getCurrentWallpaperWindowID() -> CGWindowID? {
         guard let windowList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly],
@@ -553,12 +552,11 @@ public class BackdropLayerView: NSVisualEffectView {
             .receive(on: DispatchQueue.main)
             .sink { allow in
                 if allow {
-                    guard let wallpaperPath = self.appState.currentWallpaperPath else {
-                        print("Experimental wallpaper mode unavailable: no static wallpaper path was detected.")
-                        self.appState.allowReduceTransparencyToBeDisabled = false
-                        return
+                    if let wallpaperPath = self.staticWallpaperWorkaroundPath {
+                        self.modifyImageAndSetAsWallpaper(path: wallpaperPath)
+                    } else if let windowID = self.getCurrentWallpaperWindowID() {
+                        self.wallpaper?.contents = self.getWallpaperScreenshot(cgWindowID: windowID)
                     }
-                    self.modifyImageAndSetAsWallpaper(path: wallpaperPath)
                 } else if Wallpaper.isWallpaperFromADirectory(screen: .main).compactMap({ $0 }).first == true,
                           let wallpaperPath = self.appState.currentWallpaperPath {
                     do {
