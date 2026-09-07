@@ -136,9 +136,15 @@ public class BackdropLayerView: NSVisualEffectView {
         self.wallpaper = CALayer()
         self.wallpaper!.name = "wallpaper"
         
-        if (appState.allowReduceTransparencyToBeDisabled) {
-            self.wallpaper?.contents = cropWallpaperBelowMenuBarArea(imagePath: appState.currentWallpaperPath!)
+        if appState.allowReduceTransparencyToBeDisabled,
+           let wallpaperPath = appState.currentWallpaperPath {
+            self.wallpaper?.contents = cropWallpaperBelowMenuBarArea(imagePath: wallpaperPath)
         } else {
+            if appState.allowReduceTransparencyToBeDisabled {
+                // The experimental mode requires a real image path. Dynamic wallpapers
+                // may not provide one, so fall back to the window-screenshot mode.
+                appState.allowReduceTransparencyToBeDisabled = false
+            }
             if let windowID = getCurrentWallpaperWindowID() {
                 self.wallpaper?.contents = getWallpaperScreenshot(cgWindowID: windowID)
             }
@@ -358,15 +364,11 @@ public class BackdropLayerView: NSVisualEffectView {
     }
     
     func getLastWallpaperImagePath() -> URL? {
-        let wallpapers = Wallpaper.get(screen: .main)
-        
-        return wallpapers.first!
+        Wallpaper.get(screen: .main).compactMap { $0 }.first
     }
     
     func getCurrentWallpaperImagePath() -> URL? {
-        let wallpapers = Wallpaper.getCurrent(screen: .main)
-        
-        return wallpapers.first!
+        Wallpaper.getCurrent(screen: .main).compactMap { $0 }.first
     }
     
     func cropWallpaperBelowMenuBarArea(imagePath: URL) -> NSImage? {
@@ -523,10 +525,10 @@ public class BackdropLayerView: NSVisualEffectView {
         for window in windowList {
             guard
                 let cgWindowID = window[kCGWindowNumber as String] as? CGWindowID,
-                let ownerName = window[kCGWindowOwnerName as String] as? String,
-                ownerName == "Dock",
+                let ownerPID = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                NSRunningApplication(processIdentifier: ownerPID)?.bundleIdentifier == "com.apple.dock",
                 let windowName = window[kCGWindowName as String] as? String,
-                windowName.contains(/^Wallpaper/),
+                windowName.hasPrefix("Wallpaper"),
                 let boundsDict = window[kCGWindowBounds as String] as? [String: CGFloat],
                 boundsDict["Width"] ?? 0 == NSScreen.main!.frame.width,
                 boundsDict["Height"] ?? 0 == NSScreen.main!.frame.height
@@ -550,15 +552,19 @@ public class BackdropLayerView: NSVisualEffectView {
         appState.$allowReduceTransparencyToBeDisabled
             .receive(on: DispatchQueue.main)
             .sink { allow in
-                if (allow) {
-                    self.modifyImageAndSetAsWallpaper(path: self.appState.currentWallpaperPath!)
-                } else {
-                    if (Wallpaper.isWallpaperFromADirectory(screen: .main).first! ?? false) {
-                        do {
-                            try Wallpaper.set(self.appState.currentWallpaperPath!, screen: .main)
-                        } catch {
-                            print("Error while setting wallpaper.")
-                        }
+                if allow {
+                    guard let wallpaperPath = self.appState.currentWallpaperPath else {
+                        print("Experimental wallpaper mode unavailable: no static wallpaper path was detected.")
+                        self.appState.allowReduceTransparencyToBeDisabled = false
+                        return
+                    }
+                    self.modifyImageAndSetAsWallpaper(path: wallpaperPath)
+                } else if Wallpaper.isWallpaperFromADirectory(screen: .main).compactMap({ $0 }).first == true,
+                          let wallpaperPath = self.appState.currentWallpaperPath {
+                    do {
+                        try Wallpaper.set(wallpaperPath, screen: .main)
+                    } catch {
+                        print("Error while setting wallpaper.")
                     }
                 }
                 self.viewDidChangeEffectiveAppearance()
